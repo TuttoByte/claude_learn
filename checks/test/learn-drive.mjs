@@ -1,0 +1,382 @@
+// Shared by the learn app's tests: lesson 1 driven through the reducer, with
+// the check's real FAIL messages, so tests can look at every screen.
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { loadCourse, parseLesson } from '../../learn/lib/content.mjs';
+import { beatOf, DEFER_MS, hintAvailable, IDLE_MS, initialState, lessonOf, reduce, rungsOf, stepOf } from '../../learn/lib/flow.mjs';
+import { versionSaved } from '../lessons/b-1.mjs';
+import { openRepo } from '../repo.mjs';
+import { repo, withRepo, write } from './helpers.mjs';
+
+export const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+export const course = loadCourse(root);
+export const FACTS = { root: '/home/sam/claude-code-practice', name: 'Sam', gitError: null, practiceDir: true, codespace: false, win32: false };
+
+// The b-1 item's real result for a version.txt holding `text` (null: no file).
+export function b1Item(text) {
+  return withRepo(() => repo(), (dir) => {
+    if (text !== null) write(dir, { '.practice/version.txt': text });
+    const outcome = versionSaved.check(openRepo(dir));
+    return { index: 0, text: versionSaved.text, pass: outcome === true, hint: outcome === true ? '' : outcome.replace(dir, FACTS.root) };
+  });
+}
+
+// The course with lesson 1 as the only lesson in the app, whatever else
+// learn/lessons holds, so a test of lesson 1 alone stays put.
+export const b1Only = course.map((l) => (l.id === 'b-1' ? l : { ...l, content: null }));
+// That course, with made-up content files for some lessons, { id: text }.
+export const courseWith = (texts) => b1Only.map((l) => (texts[l.id] ? { ...l, content: parseLesson(texts[l.id], `${l.id}.md`) } : l));
+
+// The course of all three levels, with made-up content files for some
+// lessons, { id: text }. The Intermediate and Advanced lessons have no lesson
+// file yet, so they are check-only unless `texts` gives one content.
+export const threeLevels = (texts = {}) => course.map((l) => (texts[l.id] ? { ...l, content: parseLesson(texts[l.id], `${l.id}.md`) } : l));
+
+// A made-up lesson 2 with what lesson 1 doesn't have: three warm-ups, a
+// third terminal, and a step that redoes an earlier one.
+export const DEMO_B2 = `---
+lesson: b-2
+title: "Demo"
+stamp: "Verified against Claude Code v2.1.285 (stable) on 2026-10-05"
+next: b-3
+---
+
+## intro
+- minutes: "about 20 minutes"
+- can: "do it"
+
+## warm-up
+
+### R1 | Warm-up | Status
+- tier: challenge
+- skill: status
+- from: b-1
+- beat: ask
+- ask: Which command shows the account?
+- right: "\`/status\`"
+- wrong: "\`/usage\`"
+- because: "Usage is something else."
+
+### R2 | Warm-up | Version
+- tier: challenge
+- skill: save-version
+- from: b-1
+- beat: type
+- ask: Which command prints the version?
+- accept: claude --version
+- reveal: "\`claude --version\`"
+
+### R3 | Warm-up | Exit
+- tier: challenge
+- skill: exit
+- from: b-1
+- beat: ask
+- ask: How do you end a session?
+- right: "\`/exit\`"
+- wrong: "\`/clear\`"
+- because: "Clear is something else."
+
+## steps
+
+### W1 | Worked example step 1 of 1 | Save the list
+- tier: guided
+- skill: snapshot
+- where: shell
+- beat: do
+- verify: check 0
+- watching: .practice/b-2-before.txt
+- evidence: .practice/b-2-before.txt
+- run: "git status --porcelain > .practice/b-2-before.txt"
+
+### Y1 | Your turn step 1 of 1 | Save it again
+- tier: challenge
+- skill: snapshot
+- where: shell
+- beat: do
+- verify: check 0 fresh
+- watching: .practice/b-2-before.txt
+- evidence: .practice/b-2-before.txt
+- goal: "Save it again."
+
+### C | Check | Check
+- tier: challenge
+- skill: check
+- where: terminal
+- beat: do
+- verify: check all
+- goal: "Run the check."
+`;
+
+// A lesson finished on the path: complete, with every one of its own steps
+// done. Help fades only for what the learner did, so a seed without `done`
+// is a learner who skipped the lesson.
+export const finished = (l) => ({ complete: true, done: l.content.steps.map((x) => x.id) });
+// Every lesson in the app before `id`, finished.
+export const finishedBefore = (id, lessons = course) => Object.fromEntries(lessons.slice(0, lessons.findIndex((l) => l.id === id)).filter((l) => l.content).map((l) => [l.id, finished(l)]));
+
+// Lesson 1 alone by default; lessonScreens passes the whole course.
+export function driver({ saved = null, facts = {}, course: lessons = b1Only } = {}) {
+  let now = 1_000;
+  let state = initialState({ course: lessons, saved, facts: { ...FACTS, ...facts }, now });
+  const effects = [];
+  const send = (ev) => {
+    now += ev.wait ?? 3_000;
+    const r = reduce(state, { now, ...ev });
+    state = r.state;
+    effects.push(...r.effects);
+    return r.effects;
+  };
+  // A key press as a person makes it: then a pause, so a held letter acts.
+  const press = (name, ch, wait) => {
+    const out = send({ type: 'key', name, ch: ch ?? (name.length === 1 ? name : name === 'space' ? ' ' : undefined), wait });
+    return [...out, ...send({ type: 'flush', wait: DEFER_MS + 50 })];
+  };
+  const key = (name, ch) => press(name, ch);
+  return { send, key, press, effects, get state() { return state; }, get now() { return now; } };
+}
+
+// On the map, moves the cursor to lesson `id`: left or right to its level,
+// then down its rows.
+export function mapTo(d, id) {
+  const levels = [...new Set(d.state.course.map((l) => l.level))];
+  const target = d.state.course.find((l) => l.id === id);
+  for (let i = 0; i < 60 && d.state.course[d.state.mapCursor].id !== id; i++) {
+    const here = levels.indexOf(d.state.course[d.state.mapCursor].level);
+    const there = levels.indexOf(target.level);
+    d.key(here === there ? 'down' : here < there ? 'right' : 'left');
+  }
+  if (d.state.course[d.state.mapCursor].id !== id) throw new Error(`mapTo: the map's cursor never reached ${id}`);
+}
+
+// Plays on as a learner who needs no help, until `stop(state)` holds: the
+// right pick, the answer typed, every check failing once then passing, a
+// clean tree, enter past every level-up and lesson end.
+export function playUntil(d, stop) {
+  for (let i = 0; i < 2_000 && !stop(d.state); i++) {
+    const s = d.state;
+    if (s.view !== 'step') {
+      d.key('enter');
+      continue;
+    }
+    const beat = beatOf(s);
+    const v = beat.verify;
+    if (['done', 'already'].includes(s.beat.status)) d.key('enter');
+    else if (beat.kind === 'type') {
+      for (const c of beat.accept[0]) d.key(c === ' ' ? 'space' : c.toLowerCase(), c);
+      d.key('enter');
+    } else if (beat.ask && beat.options.length) d.key(String(beat.options.findIndex((o) => beat.kind === 'predict' || ['right', 'option', 'other'].includes(o.kind)) + 1));
+    else if (v.kind === 'check') {
+      const l = lessonOf(s);
+      const items = (v.all ? l.items.map((_, k) => k) : v.items).map((index) => ({ index, text: l.items[index], pass: false, hint: `${l.items[index]} is not there yet.` }));
+      d.send({ type: 'check', lesson: s.lesson, items, path: beat.evidence ?? null, stamp: 'a' });
+      d.send({ type: 'check', lesson: s.lesson, items: items.map((it) => ({ ...it, pass: true, hint: '' })), path: beat.evidence ?? null, stamp: 'b' });
+    } else if (v.kind === 'file') {
+      d.send({ type: 'file', path: v.path, line: null, stamp: 'a' });
+      d.send({ type: 'file', path: v.path, line: 'src/config.js', stamp: 'b' });
+    } else if (v.kind === 'git-clean') {
+      if (beat.doneLabel) d.key('space');
+      d.send({ type: 'git', paths: [] });
+    } else d.key('space');
+  }
+  if (!stop(d.state)) throw new Error(`playUntil: stuck at ${d.state.view} ${d.state.lesson} ${stepOf(d.state)?.id}`);
+}
+
+// A check beat on screen FAILs, and FAILs again on r: the second result is
+// r's own run's.
+export function failCheck(d) {
+  const v = beatOf(d.state).verify;
+  if (v.kind !== 'check') return;
+  const l = lessonOf(d.state);
+  const items = (v.all ? l.items.map((_, k) => k) : v.items).map((index) => ({ index, text: l.items[index], pass: false, hint: `${l.items[index]} is not there yet.` }));
+  d.send({ type: 'check', lesson: d.state.lesson, items });
+  d.key('r');
+  d.send({ type: 'check', lesson: d.state.lesson, items, asked: d.state.beat.asked });
+}
+
+// Climbs the hints on the beat on screen to the exact command and says y.
+// A check beat fails first, so its ladder's rungs are there too.
+export function bottomRung(d) {
+  failCheck(d);
+  for (let i = 0; i < 8 && !d.state.beat.confirm; i++) d.key('h');
+  d.key('y');
+}
+
+// Every screen of lesson 1, in order, as [label, state] pairs.
+export function allScreens() {
+  const d = driver();
+  const out = [];
+  const snap = (label) => out.push([label, d.state]);
+  const missing = b1Item(null);
+  const empty = b1Item('');
+  const passed = b1Item('2.1.285 (Claude Code)\n');
+  snap('welcome');
+  d.key('enter'); snap('intro');
+  d.key('enter'); snap('W1');
+  d.key('space'); snap('W2');
+  d.key('2'); snap('W2 stuck');
+  d.key('1'); snap('W2 right');
+  d.key('enter'); snap('W3 opening');
+  d.send({ type: 'check', lesson: 'b-1', items: [missing] }); snap('W3 waiting');
+  d.send({ type: 'check', lesson: 'b-1', items: [empty] }); snap('W3 not yet');
+  d.key('h'); snap('W3 hint 1');
+  d.key('h'); snap('W3 hint 2');
+  d.key('h'); snap('W3 hint 3');
+  d.key('h'); snap('W3 confirm');
+  d.key('y'); snap('W3 bottom');
+  d.key('w'); snap('W3 why');
+  d.key('w');
+  d.send({ type: 'check', lesson: 'b-1', items: [passed], evidence: '2.1.285 (Claude Code)' }); snap('W3 done');
+  d.key('enter'); snap('W4 predict');
+  d.key('2'); snap('W4 guessed');
+  d.key('enter'); snap('W4 sign in');
+  d.key('space'); snap('W4 trust');
+  d.key('space'); snap('W5');
+  d.key('w'); snap('W5 why');
+  d.key('w');
+  d.key('1'); snap('W5 wrong');
+  d.key('s'); snap('W5 revealed');
+  d.key('enter'); snap('W6');
+  d.key('enter'); snap('W6 ask');
+  d.key('2'); snap('W6 decoy');
+  d.key('1'); snap('W6 right');
+  d.key('enter'); snap('W7 predict');
+  d.key('2'); snap('W7 guessed');
+  d.key('enter'); snap('W7 exit');
+  d.key('space'); snap('W7 git opening');
+  d.send({ type: 'git', paths: ['src/notes.md', 'test/new.test.js', 'a.txt', 'b.txt'] }); snap('W7 git dirty');
+  d.send({ type: 'git', paths: [] }); snap('W7 git clean');
+  // The bottom rung at W3 eased save-version: Y1 comes back GUIDED, so the
+  // level-up waits for Y2.
+  d.key('enter'); snap('Y1 eased');
+  d.send({ type: 'check', lesson: 'b-1', items: [passed], evidence: '2.1.285 (Claude Code)' }); snap('Y1 already');
+  d.key('enter'); snap('level up hinted');
+  d.key('enter'); snap('Y2');
+  d.key('1'); snap('Y2 option');
+  d.key('enter'); snap('Y3');
+  d.key('h'); snap('Y3 hint');
+  d.key('space'); snap('level up challenge');
+  d.key('enter'); snap('Y4 opening');
+  d.send({ type: 'git', paths: ['notes.md'] }); snap('Y4 live dirty');
+  d.send({ type: 'tick', wait: 121_000 }); snap('Y4 idle');
+  d.send({ type: 'git', paths: [] }); snap('Y4 live clean');
+  d.send({ type: 'paste', text: 'claude --version' }); snap('Y4 stray');
+  d.key('space'); d.send({ type: 'git', paths: ['notes.md'] }); snap('Y4 not yet');
+  d.send({ type: 'git', paths: [] }); snap('Y4 done');
+  d.key('enter'); d.send({ type: 'check', lesson: 'b-1', items: [passed] }); snap('C check');
+  d.key('enter'); for (const c of '/usage') d.key(c, c); snap('C typing');
+  d.key('enter'); snap('C wrong');
+  d.key('enter'); snap('C revealed');
+  d.key('enter'); snap('C self');
+  d.key('space'); snap('complete');
+  d.key('enter'); snap('next');
+  d.key('space'); snap('compare');
+  d.key('space');
+  d.key('m'); snap('map');
+  d.key('?'); snap('help');
+  d.key('?'); d.key('down'); d.key('enter'); snap('check-only');
+  d.send({ type: 'check', lesson: 'b-2', items: [{ index: 0, text: 'x', pass: true, hint: '' }, { index: 1, text: 'y', pass: false, hint: 'no' }] }); snap('check-only results');
+  d.key('p'); snap('page');
+  d.key('p'); d.key('c'); snap('card');
+  const r = driver({ saved: { format: 1, welcomed: true, eased: [], lessons: { 'b-1': { step: 'Y3', beat: 0, done: ['W1'] } } } });
+  out.push(['resume', r.state]);
+  r.key('x');
+  out.push(['resume confirm', r.state]);
+  r.key('n');
+  r.send({ type: 'check-error', lesson: 'b-1', message: 'boom' });
+  r.key('enter'); out.push(['Y3 resumed', r.state]);
+  const b = driver({ saved: { format: 1, welcomed: true, lessons: { 'b-1': { step: 'W3', beat: 0 } } } });
+  b.key('enter'); b.send({ type: 'check-error', lesson: 'b-1', message: 'it took too long' });
+  out.push(['W3 broken', b.state]);
+  b.key('c'); out.push(['card empty', b.state]);
+  return out;
+}
+
+// Screens of every step and beat of a lesson: each opened from a saved place,
+// then waiting, failing, done, with a hint open, as its beat allows. The
+// learner finished every lesson before it, or, with `skipped`, none.
+export function lessonScreens(id, lessons = course, { skipped = false } = {}) {
+  const l = lessons.find((x) => x.id === id);
+  const out = [];
+  const warm = l.content.warmup.slice(0, 2).map((w) => w.id);
+  const steps = [...warm.map((w) => l.content.warmup.find((x) => x.id === w)), ...l.content.steps];
+  const complete = skipped ? {} : finishedBefore(id, lessons);
+  steps.forEach((step) => step.beats.forEach((beat, b) => {
+    const d = driver({ course: lessons, saved: { format: 1, welcomed: true, lessons: { ...complete, [id]: { step: step.id, beat: b, warm, levels: ['hinted', 'challenge'] } } } });
+    d.key('enter');
+    const at = `${id} ${step.id}.${b}`;
+    out.push([`${at} open`, d.state]);
+    const v = beat.verify;
+    if (v.kind === 'check') {
+      const items = (v.all ? l.items.map((_, i) => i) : v.items).map((index) => ({ index, text: l.items[index], pass: false, hint: `${l.items[index]} is not there yet: do the step, then look again.` }));
+      d.send({ type: 'check', lesson: id, items, path: beat.evidence ?? null, stamp: 'a' });
+      out.push([`${at} waiting`, d.state]);
+      d.key('r');
+      out.push([`${at} checking`, d.state]);
+      // r's run of several items reports its last one.
+      if (items.length > 1) {
+        d.send({ type: 'running', lesson: id, items: v.all ? null : v.items, n: items.length, m: items.length, asked: d.state.beat.asked, wait: 40 });
+        out.push([`${at} checking item ${items.length} of ${items.length}`, d.state]);
+      }
+      d.send({ type: 'check', lesson: id, items, path: beat.evidence ?? null, stamp: 'b', asked: d.state.beat.asked });
+      out.push([`${at} fail`, d.state]);
+      for (let i = 0; i < 6; i++) {
+        d.send({ type: 'key', name: 'h', ch: 'h', wait: 3_000 });
+        d.send({ type: 'flush', wait: 400 });
+        out.push([`${at} hint ${i + 1}`, d.state]);
+        if (d.state.beat?.confirm) {
+          d.key('y');
+          out.push([`${at} bottom`, d.state]);
+          break;
+        }
+      }
+      // r with the last hint open: "Checking" over the "Not yet" keeps it.
+      if (d.state.beat.rung >= 0) {
+        d.key('r');
+        out.push([`${at} checking, hint open`, d.state]);
+        d.send({ type: 'check', lesson: id, items, path: beat.evidence ?? null, stamp: 'b', asked: d.state.beat.asked });
+      }
+      d.send({ type: 'check', lesson: id, items: items.map((it) => ({ ...it, pass: true, hint: '' })), evidence: 'a line of evidence', path: beat.evidence ?? null, stamp: 'c' });
+      out.push([`${at} done`, d.state]);
+    } else if (v.kind === 'file') {
+      d.send({ type: 'file', path: v.path, line: null, stamp: '' });
+      out.push([`${at} waiting`, d.state]);
+      climb(d, at, out);
+      d.send({ type: 'file', path: v.path, line: 'src/config.js', stamp: 'x' });
+      out.push([`${at} done`, d.state]);
+    } else if (v.kind === 'git-clean') {
+      d.send({ type: 'git', paths: ['src/config.js', 'test/config.test.js'] });
+      out.push([`${at} dirty`, d.state]);
+      climb(d, at, out);
+      d.send({ type: 'git', paths: [] });
+      out.push([`${at} clean`, d.state]);
+    } else if (beat.ask && beat.kind !== 'type') {
+      const wrong = beat.options.findIndex((o) => o.kind === 'wrong' || o.kind === 'decoy');
+      if (wrong >= 0) {
+        d.key(String(wrong + 1));
+        out.push([`${at} wrong`, d.state]);
+      }
+      d.key(String(beat.options.findIndex((o) => o.kind === 'right' || o.kind === 'option') + 1));
+      out.push([`${at} answered`, d.state]);
+    } else if (beat.kind === 'type') {
+      d.key('enter');
+      out.push([`${at} revealed`, d.state]);
+    } else climb(d, at, out);
+  }));
+  return out;
+}
+const rungsAt = (d) => d.state.view === 'step' && d.state.beat && !['done', 'already'].includes(d.state.beat.status);
+// Every rung behind h, the bottom line too. Where a CHALLENGE beat keeps its
+// hints for a try that can't come here, two quiet minutes open them.
+function climb(d, at, out) {
+  if (!rungsAt(d) || !rungsOf(d.state).length) return;
+  if (!hintAvailable(d.state)) d.send({ type: 'tick', wait: IDLE_MS + 1_000 });
+  for (let i = 0; i < 6 && hintAvailable(d.state) && !d.state.beat?.confirm; i++) {
+    d.send({ type: 'key', name: 'h', ch: 'h', wait: 3_000 });
+    d.send({ type: 'flush', wait: 400 });
+    out.push([`${at} hint ${i + 1}`, d.state]);
+  }
+  if (d.state.beat?.confirm) {
+    d.key('y');
+    out.push([`${at} bottom`, d.state]);
+  }
+}
